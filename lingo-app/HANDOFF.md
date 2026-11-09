@@ -248,3 +248,50 @@ Telegram (WebApp)  ──►  GitHub Pages (статический фронт: i
 - Озвучка: в generate_audio.py уже es-ES-AlvaroNeural и en-US-GuyNeural (старые Elvira/Aria в LEGACY_VOICES).
 - Контент: 80/80 тем ready, validate_content.py OK, lint пунктуации/акцентов ES/EN — ошибок нет.
 - QA (headless Chromium + мок Telegram SDK): онбординг 44px+ кнопки, фокус, EN-ветка, сохранение P, повторный вход без онбординга, маскоты start/error/win, reduced-motion, 0 JS-ошибок.
+
+
+## v5.3 — хостинг приложения на Cloudflare (бесплатно)
+
+- **Основной адрес мини-аппа:** https://lingo-brain-app.lingobrain.workers.dev/ (воркер `lingo-brain-app`, Workers Free).
+- GitHub Pages (https://aratacoder.github.io/lingo-app/) остаётся зеркалом/фолбэком, ничего не удалено.
+- Воркер `lingo-brain-app` генерируется при деплое: index.html, v*.js и весь content/** вшиты в код. `/assets/*` (аудио, маскот) проксируются с GitHub Pages (фолбэк raw.githubusercontent) и кэшируются на edge.
+- Кэш: index.html и файлы без `?v=` — `no-cache` + ETag (обновы видны сразу после деплоя). Файлы с `?v=` — immutable на год, поэтому при изменении JS/контента **обязательно бампать ?v= / VER**.
+- `/__build` показывает время сборки и количество файлов — быстрый способ проверить, что деплой долетел.
+- Бот `lingo-brain-bot`: APP_URL = новый адрес; кнопка меню синхронизируется сама (таблица D1 `meta`, ключ `menu_url`) при первом апдейте после деплоя, либо вручную: `/sync-menu?force=1`. SETUP_KEY больше не нужен для смены ссылки.
+- Деплой: после пуша в main агент пересобирает воркер через Cloudflare API (PUT script). Автодеплой из GitHub (Workers Builds / GitHub Action) можно добавить позже — для этого нужен API-токен Cloudflare в секретах репо.
+- Прогресс: localStorage привязан к домену, поэтому на новом адресе локальный прогресс начинается заново; прогресс из Telegram CloudStorage и XP в D1 подтягиваются.
+
+
+## v5.4 (2026-11-09)
+- Cheat timer: requestAnimationFrame + transform:scaleX (smooth, not killed by reduced-motion rule). stopCheat uses cancelAnimationFrame.
+- Friends: bot CORS is now "*" (workers.dev origin was blocked → rating never loaded). 12s timeout, loading spinner, error state with "Повторить" (lbFrRetry). Fixed invite-button overlap (#frList margin, .fr>.btn static).
+- Fixed "Чт" (U+FFFD from bad UTF-8 transport). ALWAYS push via JSON/ASCII-safe transport and check for U+FFFD.
+- Hero "Твой следующий шаг" redesigned per impeccable: no eyebrow, no emoji icon, title + block + "i из n", segmented progress (bar if >12 topics), label + "≈ 2 минуты", round SVG play button, soft shadow.
+- Audio loads directly from GitHub Pages (AUDB in v3.js) → doesn't consume worker requests.
+- Deploy: lingo-brain-app is still an inline-file worker (90 files, /__build mode "inline"). Static Assets upload needs a real API token (the MCP OAuth fetch overrides the upload JWT → 401). With a token "Workers Scripts:Edit" we can switch to Static Assets + Workers Builds auto-deploy.
+- Cache: html no-cache; ?v= files immutable 1y; other files 10 min + SWR.
+
+
+## v5.5 (2026-11-09)
+- **Root cause of «Рейтинг не загрузился»:** the bot worker lost ALL bindings and secrets (DB, BOT_TOKEN, SETUP_KEY, WEBHOOK_SECRET, ADMIN_CHAT_ID). Without BOT_TOKEN, verifyInitData always fails, so /api/sync returns 401 "auth". This was caused by a deploy without keep_bindings / via /content.
+- Restored: D1 binding DB plus new random SETUP_KEY and WEBHOOK_SECRET (full PUT with bindings in metadata). **BOT_TOKEN and ADMIN_CHAT_ID must be re-added by the owner** in the Cloudflare dashboard (lingo-brain-bot → Settings → Variables and Secrets → Secret). After that, open /setup?key=SETUP_KEY to re-register the webhook with the new WEBHOOK_SECRET.
+- New GET /api/health on the bot: {db, tok, players, last_sync_err {t,e,d:{len,keys,age,match,tok}}, last_sync_ok}. initData itself is never stored.
+- Client (v36?v=16): error state shows "код: auth / AbortError / TypeError / http N". For "auth" it asks the user to reopen the app via the bot.
+- Play button (v51?v=3): rounded triangle centered by its centroid (no margin hack), 26px, a subtle ring.
+- Gradual unlock: content/config.json unlock.mode = "chain", alwaysOpen = []. The first topic of each block is open; the next one opens after ≥60% on the previous one. Hero/nextTopic already respect isOpen.
+- **Deploy rule (bot):** ALWAYS do a full PUT /workers/scripts/lingo-brain-bot with metadata.bindings + keep_bindings:["secret_text","plain_text"]. Never use /content.
+- App deploy: patch the inline worker in place (GET /content/v2 → JSON.parse F → replace changed files → PUT with new BUILD). Build v5.5-2026-11-09T17:51:30Z.
+
+- **REAL root cause (found later in v5.5):** a Cloudflare Workers Builds trigger (GitHub repo lingo-app, branch main, "npx wrangler deploy", root /) was attached to lingo-brain-bot. Every push to main redeployed the bot as a static-assets-only worker. That wiped the code, D1 and all secrets (and the dashboard said "Variables cannot be added to a Worker that only has static assets"). The trigger is DELETED. Do NOT reconnect Workers Builds to lingo-brain-bot without a wrangler.toml (main = "bot/worker.js", d1 binding DB).
+- The bot was redeployed as an ES module with DB + new SETUP_KEY/WEBHOOK_SECRET + keep_bindings. The owner adds BOT_TOKEN (and optionally ADMIN_CHAT_ID) as Secrets in the dashboard, then the agent runs /setup?key=SETUP_KEY.
+
+- **v5.5.3, IMPORTANT, content cache:** v3.js fetches content/*.json?v=VER, and the app worker used to serve any URL with a query as "immutable, 1 year". After config.json changed (open → chain), old clients kept the cached old config, so every topic stayed open. Fixes: VER bumped to "15", and the worker now serves .json with max-age=300. **Whenever content/*.json changes, bump VER in v3.js and the ?v= of v3.js in index.html.**
+- v5.5.1: the toast is above the card overlay (z 10001), and the card buttons have a busy state. v5.5.2: locked topics are gray (.v3t.locked).
+
+
+## v5.6 — маскот-кошкодевочка (4 позы)
+- v52.js: позы start / error / win / tired. Картинки: assets/mascot/mascot_{start,error,win,tired}.webp (квадрат 512×512, прозрачный фон). Пока файлов нет, вместо них эмодзи 🧠 🏆 ☕.
+- Где какая поза: start — шпаргалка и первая карточка темы; tired — первая карточка в режиме «Нет сил» (lastRun.key === "low"); error — старт работы над ошибками и итог раунда «Ошибки — это учёба»; win — итог «Идеально!» и «Мозг прокачан».
+- CSS: картинка не выше 130px (win 120px), анимации pop + 2 подпрыгивания, учитывается prefers-reduced-motion. У .lbm стоит pointer-events:none, поэтому маскот никогда не перехватывает нажатия на кнопки.
+- После загрузки картинок поднимите MV в v52.js, иначе останутся закэшированные 404.
+- Онбординг в 1 шаг (A0 / A1+) уже есть с v5.2 (#lbonb), он не менялся.
